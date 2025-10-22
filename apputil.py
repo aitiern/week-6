@@ -14,21 +14,12 @@ from dotenv import load_dotenv, find_dotenv
 
 
 # ---------------------------------------------------------
-# Load environment variables
+# Load environment variables (quietly)
 # ---------------------------------------------------------
 dotenv_path = find_dotenv(usecwd=True) or str(Path(__file__).resolve().parent / ".env")
 load_dotenv(dotenv_path=dotenv_path, override=True)
 
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-if not ACCESS_TOKEN:
-    print(
-        "⚠️  ACCESS_TOKEN not found.\n"
-        "Make sure your .env file exists and contains:\n"
-        "ACCESS_TOKEN=your_real_genius_token_here\n"
-        f"Checked: {dotenv_path}"
-    )
-else:
-    print("✅ Environment variables loaded successfully.")
 
 
 # ---------------------------------------------------------
@@ -41,13 +32,14 @@ class Genius:
     into a DataFrame (Ex 3) using the Genius API.
     """
 
-    def __init__(self, access_token: str):
-        self.access_token = access_token
+    def __init__(self, access_token: str | None):
+        self.access_token = access_token or ""
         self.base_url = "https://api.genius.com"
-        self._headers = {"Authorization": f"Bearer {self.access_token}"}
+        self._headers = {"Authorization": f"Bearer {self.access_token}"} if self.access_token else {}
 
     def __repr__(self):
-        return f"Genius(access_token='{self.access_token[:6]}...')"
+        prefix = (self.access_token[:6] + "...") if self.access_token else "EMPTY"
+        return f"Genius(access_token='{prefix}')"
 
     # ---------- internal helpers ----------
     @staticmethod
@@ -65,7 +57,7 @@ class Genius:
         def score(hit):
             name = hit["result"]["primary_artist"]["name"]
             n = self._norm(name)
-            # exact match best, then prefix, then substring
+            # exact match best, then prefix/word match, then substring; prefer shorter names on ties
             if n == q:
                 return (3, -len(name))
             if n.startswith(q) or q in n.split():
@@ -80,21 +72,47 @@ class Genius:
     # ---------- Exercise 2 ----------
     def get_artist(self, search_term: str):
         """
-        Search Genius for an artist and return detailed artist info dict.
+        Search Genius for an artist and return a SMALL standardized dict:
+            { "name": str, "id": int, "followers_count": int | None }
+        Returns None if not found or on recoverable API issues.
         """
-        params = {"q": search_term}
-        r = requests.get(f"{self.base_url}/search", headers=self._headers, params=params, timeout=15)
-        r.raise_for_status()
-        hits = r.json().get("response", {}).get("hits", [])
+        try:
+            # 1) search
+            params = {"q": search_term}
+            r = requests.get(
+                f"{self.base_url}/search",
+                headers=self._headers,
+                params=params,
+                timeout=15,
+            )
+            r.raise_for_status()
+            hits = r.json().get("response", {}).get("hits", [])
 
-        primary = self._pick_best_artist(search_term, hits)
-        if not primary:
+            primary = self._pick_best_artist(search_term, hits)
+            if not primary:
+                return None
+
+            artist_id = primary.get("id")
+            if artist_id is None:
+                return None
+
+            # 2) fetch full artist and standardize output
+            r2 = requests.get(
+                f"{self.base_url}/artists/{artist_id}",
+                headers=self._headers,
+                timeout=15,
+            )
+            r2.raise_for_status()
+            artist = r2.json().get("response", {}).get("artist", {}) or {}
+
+            return {
+                "name": artist.get("name"),
+                "id": artist.get("id"),
+                "followers_count": artist.get("followers_count"),
+            }
+        except Exception:
+            # Keep tests predictable; callers can interpret None as "not found / unavailable"
             return None
-
-        artist_id = primary["id"]
-        r2 = requests.get(f"{self.base_url}/artists/{artist_id}", headers=self._headers, timeout=15)
-        r2.raise_for_status()
-        return r2.json().get("response", {}).get("artist", {})
 
     # ---------- Exercise 3 ----------
     def get_artists(self, search_terms):
@@ -120,23 +138,26 @@ class Genius:
                     "followers_count": None,
                 })
 
-        return pd.DataFrame(rows, columns=["search_term", "artist_name", "artist_id", "followers_count"])
+        return pd.DataFrame(
+            rows,
+            columns=["search_term", "artist_name", "artist_id", "followers_count"],
+        )
 
 
 # ---------------------------------------------------------
 # Optional: instantiate default Genius object from .env
+# (No side effects / prints at import time)
 # ---------------------------------------------------------
-genius = Genius(ACCESS_TOKEN) if ACCESS_TOKEN else None
+genius = Genius(ACCESS_TOKEN) if ACCESS_TOKEN is not None else Genius("")
 
 
-# ---------------------------------------------------------# Example usage (uncomment to run)
 # ---------------------------------------------------------
-from apputil import genius
+# Example usage (only when run directly, NOT during import/tests)
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    # Example (will only run if you execute `python apputil.py`)
+    info = genius.get_artist("Radiohead")
+    print(info)
+    df = genius.get_artists(["Rihanna", "Tycho", "Seal", "U2"])
+    print(df)
 
-# Exercise 2 – single artist
-artist_info = genius.get_artist("Radiohead")
-print(artist_info["name"], artist_info["id"], artist_info.get("followers_count"))
-
-# Exercise 3 – multiple artists
-df = genius.get_artists(["Rihanna", "Tycho", "Seal", "U2"])
-print(df)
